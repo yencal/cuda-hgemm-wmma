@@ -1,5 +1,6 @@
 // autotune.cuh
 // Autotuning framework for HGEMM kernels (FP16)
+// Expanded configuration space for A100 (164KB dynamic shared memory)
 
 #pragma once
 
@@ -116,24 +117,173 @@ inline std::vector<TuneConfig> GetWMMADynSmemVariants() {
     };
 }
 
-// For WMMAFinal with swizzle variants
+// ============================================================================
+// Expanded configuration space for WMMAFinal (optimized for A100)
+// A100 supports up to 164KB dynamic shared memory per block
+// ============================================================================
 template<template<int, int, int, int, int, int, bool, int> class Kernel>
 inline std::vector<TuneConfig> GetWMMAFinalVariants() {
     return {
-        // No swizzle (best for large L2 like H200)
+        // ====================================================================
+        // 128x128 block tiles, BK=32 (~18.5 KB/stage)
+        // Baseline configuration, good balance of compute and memory
+        // ====================================================================
+        // No swizzle
         TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 2, false, 8),
         TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 3, false, 8),
-        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 3, false, 8),
-        
-        // With swizzle, GROUP_SIZE_M=8
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 4, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 5, false, 8),
+        // With swizzle, varying GROUP_SIZE_M
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 2, true, 4),
         TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 2, true, 8),
-        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 3, true, 8),
-        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 3, true, 8),
-        
-        // With swizzle, GROUP_SIZE_M=16
         TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 2, true, 16),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 3, true, 4),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 3, true, 8),
         TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 3, true, 16),
-        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 3, true, 16),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 4, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 5, true, 8),
+
+        // ====================================================================
+        // 128x128 block tiles, BK=64 (~35 KB/stage)
+        // Deeper K dimension - more work per shared memory load
+        // Better arithmetic intensity, good for hiding memory latency
+        // ====================================================================
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 64, 64, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 64, 64, 3, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 64, 64, 4, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 64, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 64, 64, 3, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 64, 64, 4, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 64, 64, 2, true, 4),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 64, 64, 2, true, 16),
+
+        // ====================================================================
+        // 128x128 block tiles with 32x32 warp tiles (16 warps vs 4)
+        // Higher thread count per block, different occupancy characteristics
+        // ====================================================================
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 32, 32, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 32, 32, 3, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 32, 32, 4, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 32, 32, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 32, 32, 3, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 32, 32, 4, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 32, 32, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 32, 32, 3, true, 8),
+
+        // ====================================================================
+        // 256x128 block tiles (~28.5 KB/stage)
+        // Larger M dimension - processes more rows per block
+        // Good when M >> N or for better L2 reuse of B
+        // ====================================================================
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 3, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 4, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 2, true, 4),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 2, true, 16),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 3, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 4, true, 8),
+        // With BK=64
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 64, 64, 64, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 64, 64, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 64, 64, 64, 3, true, 8),
+
+        // ====================================================================
+        // 128x256 block tiles (~26.5 KB/stage)
+        // Larger N dimension - processes more columns per block
+        // Good when N >> M or for better L2 reuse of A
+        // ====================================================================
+        TUNE_CONFIG_FINAL(Kernel, 128, 256, 32, 64, 64, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 256, 32, 64, 64, 3, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 256, 32, 64, 64, 4, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 256, 32, 64, 64, 2, true, 4),
+        TUNE_CONFIG_FINAL(Kernel, 128, 256, 32, 64, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 256, 32, 64, 64, 2, true, 16),
+        TUNE_CONFIG_FINAL(Kernel, 128, 256, 32, 64, 64, 3, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 256, 32, 64, 64, 4, true, 8),
+        // With BK=64
+        TUNE_CONFIG_FINAL(Kernel, 128, 256, 64, 64, 64, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 256, 64, 64, 64, 2, true, 8),
+
+        // ====================================================================
+        // 256x256 block tiles (~36.5 KB/stage)
+        // Largest square tile - maximum compute per block
+        // May have lower occupancy but better data reuse
+        // ====================================================================
+        TUNE_CONFIG_FINAL(Kernel, 256, 256, 32, 64, 64, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 256, 32, 64, 64, 3, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 256, 32, 64, 64, 4, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 256, 32, 64, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 256, 32, 64, 64, 3, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 256, 32, 64, 64, 2, true, 4),
+        TUNE_CONFIG_FINAL(Kernel, 256, 256, 32, 64, 64, 2, true, 16),
+
+        // ====================================================================
+        // 64x64 block tiles (~9.5 KB/stage with BK=32)
+        // Smaller blocks - higher occupancy, more blocks in flight
+        // Good for smaller matrices or when occupancy is limiting
+        // ====================================================================
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 32, 32, 32, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 32, 32, 32, 3, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 32, 32, 32, 4, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 32, 32, 32, 5, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 32, 32, 32, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 32, 32, 32, 3, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 32, 32, 32, 4, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 32, 32, 32, 5, true, 8),
+        // With BK=64 (~18 KB/stage)
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 64, 32, 32, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 64, 32, 32, 3, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 64, 32, 32, 4, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 64, 32, 32, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 64, 32, 32, 3, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 64, 64, 32, 32, 4, true, 8),
+
+        // ====================================================================
+        // 256x64 block tiles (~24.5 KB/stage)
+        // Very tall blocks - extreme M dimension bias
+        // ====================================================================
+        TUNE_CONFIG_FINAL(Kernel, 256, 64, 32, 64, 32, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 64, 32, 64, 32, 3, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 64, 32, 64, 32, 4, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 64, 32, 64, 32, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 64, 32, 64, 32, 3, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 64, 32, 64, 32, 4, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 64, 64, 64, 32, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 64, 64, 64, 32, 3, true, 8),
+
+        // ====================================================================
+        // 64x256 block tiles (~21.5 KB/stage)
+        // Very wide blocks - extreme N dimension bias
+        // ====================================================================
+        TUNE_CONFIG_FINAL(Kernel, 64, 256, 32, 32, 64, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 256, 32, 32, 64, 3, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 256, 32, 32, 64, 4, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 256, 32, 32, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 256, 32, 32, 64, 3, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 256, 32, 32, 64, 4, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 256, 64, 32, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 256, 64, 32, 64, 3, true, 8),
+
+        // ====================================================================
+        // 64x128 and 128x64 block tiles
+        // Medium asymmetric tiles
+        // ====================================================================
+        TUNE_CONFIG_FINAL(Kernel, 64, 128, 32, 32, 64, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 128, 32, 32, 64, 3, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 128, 32, 32, 64, 4, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 128, 32, 32, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 128, 32, 32, 64, 3, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 128, 64, 32, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 64, 128, 64, 32, 64, 3, true, 8),
+
+        TUNE_CONFIG_FINAL(Kernel, 128, 64, 32, 64, 32, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 64, 32, 64, 32, 3, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 64, 32, 64, 32, 4, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 64, 32, 64, 32, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 64, 32, 64, 32, 3, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 64, 64, 64, 32, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 64, 64, 64, 32, 3, true, 8),
     };
 }
 
@@ -158,7 +308,7 @@ inline TuneConfig Autotune(
 
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
-            printf("  %-36s SKIP (%s)\n", config.name, cudaGetErrorString(err));
+            printf("  %-40s SKIP (%s)\n", config.name, cudaGetErrorString(err));
             continue;
         }
 
@@ -178,7 +328,7 @@ inline TuneConfig Autotune(
         ms /= iters;
 
         double tflops = (2.0 * M * N * K) / (ms * 1e9);
-        printf("  %-36s %7.3f ms  %6.2f TFLOPS\n", config.name, ms, tflops);
+        printf("  %-40s %7.3f ms  %6.2f TFLOPS\n", config.name, ms, tflops);
 
         if (ms < best_time) {
             best_time = ms;
