@@ -252,3 +252,90 @@ __device__ void epilogueAndStore(
         }
     }
 }
+
+// =========================================================================
+// Vectorized Epilogue (reuses existing shared memory)
+// =========================================================================
+template <int BM, int BN, int WM, int WN, 
+          int MMA_M, int MMA_N, int MMA_K,
+          int MMA_M_TILES, int MMA_N_TILES, 
+          int WARPS_M, int WARPS_N,
+          int C_SMEM_STRIDE>
+__device__ void epilogueAndStore_vec4(
+    wmma::fragment<wmma::accumulator, MMA_M, MMA_N, MMA_K, __half> acc[MMA_M_TILES][MMA_N_TILES],
+    __half *smem,      // Reused shared memory (was used for A/B)
+    __half *C,
+    int N,
+    __half alpha,
+    __half beta,
+    uint tid,
+    uint warpM,
+    uint warpN)
+{
+    // Use passed-in smem as C_smem
+    __half *C_smem = smem;
+    
+    // ====== Step 1: Scale by alpha and handle beta ======
+    #pragma unroll
+    for (int m = 0; m < MMA_M_TILES; ++m) {
+        #pragma unroll
+        for (int n = 0; n < MMA_N_TILES; ++n) {
+            // Scale accumulator by alpha
+            #pragma unroll
+            for (int i = 0; i < acc[m][n].num_elements; ++i) {
+                acc[m][n].x[i] = __hmul(acc[m][n].x[i], alpha);
+            }
+            
+            // Handle beta * C if beta != 0
+            if (__heq(beta, __float2half(0.0f)) == false) {
+                __half *C_ptr = C + (warpM * WM + m * MMA_M) * N 
+                                  + (warpN * WN + n * MMA_N);
+                wmma::fragment<wmma::accumulator, MMA_M, MMA_N, MMA_K, __half> c_frag;
+                wmma::load_matrix_sync(c_frag, C_ptr, N, wmma::mem_row_major);
+                
+                #pragma unroll
+                for (int i = 0; i < acc[m][n].num_elements; ++i) {
+                    acc[m][n].x[i] = __hadd(acc[m][n].x[i], __hmul(beta, c_frag.x[i]));
+                }
+            }
+        }
+    }
+    
+    // ====== Step 2: Store fragments to shared memory ======
+    #pragma unroll
+    for (int m = 0; m < MMA_M_TILES; ++m) {
+        #pragma unroll
+        for (int n = 0; n < MMA_N_TILES; ++n) {
+            __half *C_smem_ptr = &C_smem[(warpM * WM + m * MMA_M) * C_SMEM_STRIDE 
+                                        + (warpN * WN + n * MMA_N)];
+            wmma::store_matrix_sync(C_smem_ptr, acc[m][n], C_SMEM_STRIDE, wmma::mem_row_major);
+        }
+    }
+    
+    __syncthreads();
+    
+    // ====== Step 3: Vectorized copy from shared to global ======
+    constexpr int NUM_THREADS = WARPS_M * WARPS_N * 32;
+    constexpr int TOTAL_ELEMENTS = BM * BN;
+    constexpr int ELEMENTS_PER_VEC = 8;  // float4 = 8 halves
+    constexpr int TOTAL_VECS = TOTAL_ELEMENTS / ELEMENTS_PER_VEC;
+    constexpr int VECS_PER_THREAD = TOTAL_VECS / NUM_THREADS;
+    
+    static_assert(BN % 8 == 0, "BN must be divisible by 8 for vectorized stores");
+    static_assert(TOTAL_VECS % NUM_THREADS == 0, "Vectors must divide evenly among threads");
+    
+    #pragma unroll
+    for (int i = 0; i < VECS_PER_THREAD; ++i) {
+        int vec_idx = tid + i * NUM_THREADS;
+        
+        int vecs_per_row = BN / ELEMENTS_PER_VEC;
+        int row = vec_idx / vecs_per_row;
+        int col8 = vec_idx % vecs_per_row;
+        
+        // Load from shared (padded stride)
+        float4 val = *reinterpret_cast<float4*>(&C_smem[row * C_SMEM_STRIDE + col8 * 8]);
+        
+        // Store to global (natural stride N)
+        *reinterpret_cast<float4*>(&C[row * N + col8 * 8]) = val;
+    }
+}

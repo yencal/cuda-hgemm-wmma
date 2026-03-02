@@ -13,6 +13,7 @@
 #include "05_wmma_multistage.cuh"
 #include "06_wmma_double_buffer.cuh"
 #include "07_wmma_dynsmem.cuh"
+#include "08_wmma_final.cuh"
 #include "autotune.cuh"
 
 int main(int argc, char** argv)
@@ -45,8 +46,11 @@ int main(int argc, char** argv)
     // printf("Autotuning 06_WMMADoubleBuffer\n");
     // RunAutotune<WMMADoubleBufferTag>(GetWMMAMultistageVariants<WMMADoubleBuffer>());
 
-    printf("Autotuning 07_WMMADynSmem\n");
-    RunAutotune<WMMADynSmemTag>(GetWMMADynSmemVariants<WMMADynSmem>());
+    // printf("Autotuning 07_WMMADynSmem\n");
+    // RunAutotune<WMMADynSmemTag>(GetWMMADynSmemVariants<WMMADynSmem>());
+
+    printf("Autotuning 08_WMMAFinal\n");
+    RunAutotune<WMMAFinalTag>(GetWMMADynSmemVariants<WMMAFinal>());
 
     for (int N : sizes) {
         int M = N, K = N;
