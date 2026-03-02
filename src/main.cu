@@ -31,7 +31,7 @@ int main(int argc, char** argv)
     // Autotune all kernels upfront
     // ========================================
     printf("============================================================\n");
-    printf("Autotuning all kernels on 4096x4096x4096...\n");
+    printf("Autotuning all kernels ...\n");
     printf("============================================================\n\n");
 
     printf("Autotuning 01_WMMABlockTiling\n");
@@ -89,7 +89,7 @@ int main(int argc, char** argv)
         results.push_back(RunCuBLASBenchmark<HGEMMCuBLAS>(
             "00_cuBLAS", handle, M, N, K, alpha, d_A, d_B, beta, d_C));
 
-        // 01-08: Autotuned kernels
+        // 01-07: Autotuned kernels (tuned once at start)
         RunAndRecordAutotuned<WMMABlockTilingTag>(
             results, "01_WMMABlockTiling", M, N, K, alpha, d_A, d_B, beta, d_C, d_C_ref);
 
@@ -111,15 +111,17 @@ int main(int argc, char** argv)
         RunAndRecordAutotuned<WMMADynSmemTag>(
             results, "07_WMMADynSmem", M, N, K, alpha, d_A, d_B, beta, d_C, d_C_ref);
 
-        RunAndRecordAutotuned<WMMAFinalTag>(
-            results, "08_WMMAFinal", M, N, K, alpha, d_A, d_B, beta, d_C, d_C_ref);
+        // 08: WMMAFinal - autotuned per size, FIXED label for plotting
+        RunAutotune<WMMAFinalTag>(GetWMMAFinalVariants<WMMAFinal>(), N);
+        CHECK_CUDA(cudaMemset(d_C, 0, M * N * sizeof(__half)));
+        results.push_back(RunBenchmark<Autotuned<WMMAFinalTag>>(
+            "08_WMMAFinal", M, N, K, alpha, d_A, d_B, beta, d_C, d_C_ref));
 
         CHECK_CUDA(cudaFree(d_A));
         CHECK_CUDA(cudaFree(d_B));
         CHECK_CUDA(cudaFree(d_C));
         CHECK_CUDA(cudaFree(d_C_ref));
     }
-
     CHECK_CUBLAS(cublasDestroy(handle));
 
     WriteCSV(results, "hgemm_results.csv");
