@@ -52,6 +52,12 @@ struct Autotuned {
     TuneConfig{#BM "x" #BN "x" #BK "_" #WM "x" #WN "_S" #STAGES, \
                Kernel<BM, BN, BK, WM, WN, STAGES>::Run}
 
+// For WMMAFinal with swizzle options
+#define TUNE_CONFIG_FINAL(Kernel, BM, BN, BK, WM, WN, STAGES, USE_SWIZZLE, GROUP_SIZE_M) \
+    TuneConfig{#BM "x" #BN "x" #BK "_" #WM "x" #WN "_S" #STAGES \
+               "_sw" #USE_SWIZZLE "_g" #GROUP_SIZE_M, \
+               Kernel<BM, BN, BK, WM, WN, STAGES, USE_SWIZZLE, GROUP_SIZE_M>::Run}
+
 template<template<int, int, int, int, int> class Kernel>
 inline std::vector<TuneConfig> GetWMMAVariants() {
     return {
@@ -109,6 +115,27 @@ inline std::vector<TuneConfig> GetWMMADynSmemVariants() {
     };
 }
 
+// For WMMAFinal with swizzle variants
+template<template<int, int, int, int, int, int, bool, int> class Kernel>
+inline std::vector<TuneConfig> GetWMMAFinalVariants() {
+    return {
+        // No swizzle (best for large L2 like H200)
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 3, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 3, false, 8),
+        
+        // With swizzle, GROUP_SIZE_M=8
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 3, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 3, true, 8),
+        
+        // With swizzle, GROUP_SIZE_M=16
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 2, true, 16),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 3, true, 16),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 3, true, 16),
+    };
+}
+
 inline TuneConfig Autotune(
     const std::vector<TuneConfig>& variants,
     int M, int N, int K, __half alpha,
@@ -130,7 +157,7 @@ inline TuneConfig Autotune(
 
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
-            printf("  %-28s SKIP (%s)\n", config.name, cudaGetErrorString(err));
+            printf("  %-36s SKIP (%s)\n", config.name, cudaGetErrorString(err));
             continue;
         }
 
@@ -150,7 +177,7 @@ inline TuneConfig Autotune(
         ms /= iters;
 
         double tflops = (2.0 * M * N * K) / (ms * 1e9);
-        printf("  %-28s %7.3f ms  %6.2f TFLOPS\n", config.name, ms, tflops);
+        printf("  %-36s %7.3f ms  %6.2f TFLOPS\n", config.name, ms, tflops);
 
         if (ms < best_time) {
             best_time = ms;

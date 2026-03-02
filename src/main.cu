@@ -27,30 +27,9 @@ int main(int argc, char** argv)
     cublasHandle_t handle;
     CHECK_CUBLAS(cublasCreate(&handle));
 
-    // // Autotune both kernels once before the benchmark loop
-    // printf("Autotuning 01_WMMABlockTiling\n");
-    // RunAutotune<WMMABlockTilingTag>(GetWMMAVariants<WMMABlockTiling>());
-
-    // printf("Autotuning 02_WMMAVectorized\n");
-    // RunAutotune<WMMAVectorizedTag>(GetWMMAVectorizedVariants<WMMAVectorized>());
-
-    // printf("Autotuning 03_WMMAAsync\n");
-    // RunAutotune<WMMAAsyncTag>(GetWMMAVectorizedVariants<WMMAAsync>());
-
-    // printf("Autotuning 04_WMMAPadded\n");
-    // RunAutotune<WMMAPaddedTag>(GetWMMAVectorizedVariants<WMMAPadded>());
-
-    // printf("Autotuning 05_WMMAMultistage\n");
-    // RunAutotune<WMMAMultistageTag>(GetWMMAMultistageVariants<WMMAMultistage>());
-
-    // printf("Autotuning 06_WMMADoubleBuffer\n");
-    // RunAutotune<WMMADoubleBufferTag>(GetWMMAMultistageVariants<WMMADoubleBuffer>());
-
-    // printf("Autotuning 07_WMMADynSmem\n");
-    // RunAutotune<WMMADynSmemTag>(GetWMMADynSmemVariants<WMMADynSmem>());
-
-    printf("Autotuning 08_WMMAFinal\n");
-    RunAutotune<WMMAFinalTag>(GetWMMADynSmemVariants<WMMAFinal>());
+    // Autotune WMMAFinal with swizzle variants
+    printf("Autotuning 08_WMMAFinal (with swizzle variants)\n");
+    RunAutotune<WMMAFinalTag>(GetWMMAFinalVariants<WMMAFinal>());
 
     for (int N : sizes) {
         int M = N, K = N;
@@ -92,7 +71,7 @@ int main(int argc, char** argv)
 
         // 04: WMMAPadded
         CHECK_CUDA(cudaMemset(d_C, 0, M * N * sizeof(__half)));
-        results.push_back(RunBenchmark<WMMAPadded<128, 128, 16, 64, 64>>(
+        results.push_back(RunBenchmark<WMMAPadded<128, 128, 32, 64, 64>>(
             "04_WMMAPadded", M, N, K, alpha, d_A, d_B, beta, d_C, d_C_ref));
 
         // 05: WMMAMultistage
@@ -109,6 +88,21 @@ int main(int argc, char** argv)
         CHECK_CUDA(cudaMemset(d_C, 0, M * N * sizeof(__half)));
         results.push_back(RunBenchmark<WMMADynSmem<128, 128, 32, 64, 64, 2>>(
             "07_WMMADynSmem", M, N, K, alpha, d_A, d_B, beta, d_C, d_C_ref));
+
+        // 08: WMMAFinal (no swizzle - best for H200)
+        CHECK_CUDA(cudaMemset(d_C, 0, M * N * sizeof(__half)));
+        results.push_back(RunBenchmark<WMMAFinal<256, 128, 32, 64, 64, 3, false, 8>>(
+            "08_WMMAFinal", M, N, K, alpha, d_A, d_B, beta, d_C, d_C_ref));
+
+        // 08b: WMMAFinal with swizzle (GROUP_SIZE_M=8)
+        CHECK_CUDA(cudaMemset(d_C, 0, M * N * sizeof(__half)));
+        results.push_back(RunBenchmark<WMMAFinal<256, 128, 32, 64, 64, 3, true, 8>>(
+            "08_WMMAFinal_sw8", M, N, K, alpha, d_A, d_B, beta, d_C, d_C_ref));
+
+        // 08c: WMMAFinal with swizzle (GROUP_SIZE_M=16)
+        CHECK_CUDA(cudaMemset(d_C, 0, M * N * sizeof(__half)));
+        results.push_back(RunBenchmark<WMMAFinal<256, 128, 32, 64, 64, 3, true, 16>>(
+            "08_WMMAFinal_sw16", M, N, K, alpha, d_A, d_B, beta, d_C, d_C_ref));
 
         CHECK_CUDA(cudaFree(d_A));
         CHECK_CUDA(cudaFree(d_B));
