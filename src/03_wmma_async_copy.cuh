@@ -36,8 +36,9 @@ __global__ void wmma_async(
     static_assert((BM * BK) % NUM_THREADS == 0, "A tile must be evenly divisible among threads");
     static_assert((BN * BK) % NUM_THREADS == 0, "B tile must be evenly divisible among threads");
 
-    __shared__ __half As[BM * BK];
-    __shared__ __half Bs[BN * BK];
+    extern __shared__ __half smem[];
+    __half* As = smem;
+    __half* Bs = smem + BM * BK;
 
     const uint tid = threadIdx.x;
     const uint warpId = tid / 32;
@@ -105,13 +106,23 @@ struct WMMAAsync {
     static constexpr int WARPS_M = BM / WM;
     static constexpr int WARPS_N = BN / WN;
     static constexpr int NUM_THREADS = WARPS_M * WARPS_N * 32;
+    static constexpr size_t SMEM_SIZE = (BM * BK + BN * BK) * sizeof(__half);
 
     static void Run(int M, int N, int K, __half alpha,
                     const __half* A, const __half* B,
                     __half beta, __half* C) {
+        static bool configured = false;
+        if (!configured) {
+            cudaFuncSetAttribute(
+                wmma_async<BM, BN, BK, WM, WN>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                SMEM_SIZE
+            );
+            configured = true;
+        }
         dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
         dim3 block(NUM_THREADS);
-        wmma_async<BM, BN, BK, WM, WN><<<grid, block>>>(
+        wmma_async<BM, BN, BK, WM, WN><<<grid, block, SMEM_SIZE>>>(
             M, N, K, alpha, A, B, beta, C);
     }
 
@@ -120,5 +131,6 @@ struct WMMAAsync {
         printf("  Block tile: %dx%dx%d\n", BM, BN, BK);
         printf("  Warp tile:  %dx%d\n", WM, WN);
         printf("  Threads:    %d\n", NUM_THREADS);
+        printf("  Shared mem: %.2f KB\n", SMEM_SIZE / 1024.0f);
     }
 };

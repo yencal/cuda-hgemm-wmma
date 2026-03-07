@@ -95,26 +95,30 @@ inline std::vector<TuneConfig> GetWMMAVectorizedVariants() {
 template<template<int, int, int, int, int, int> class Kernel>
 inline std::vector<TuneConfig> GetWMMAMultistageVariants() {
     return {
-        // sm_80 (A100): 48KB shared mem, STAGES * BK <= 96
-        // 2-stage
+        // BK=32
         TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 32, 64, 64, 2), 
-        TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 32, 32, 32, 2), 
-        // 3-stage
-        TUNE_CONFIG_MULTISTAGE(Kernel, 128, 64, 32, 64, 32, 3),
-        TUNE_CONFIG_MULTISTAGE(Kernel, 64, 128, 32, 32, 64, 3),
-        // 4-stage
-        TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 16, 64, 64, 4),
-        TUNE_CONFIG_MULTISTAGE(Kernel, 64, 64, 32, 32, 32, 4),
+        TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 32, 32, 32, 2),
+        TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 32, 32, 32, 3),
+        // BK=64 (needs dynamic smem)
+        TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 64, 32, 32, 2),
+        TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 64, 32, 32, 3),
+        TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 64, 64, 64, 2),
+        TUNE_CONFIG_MULTISTAGE(Kernel, 256, 128, 64, 64, 64, 2),
     };  
 }
 
 template<template<int, int, int, int, int, int> class Kernel>
 inline std::vector<TuneConfig> GetWMMADynSmemVariants() {
     return {
+        // BK=32
         TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 32, 64, 64, 2),
         TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 32, 64, 64, 3),
-        TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 32, 64, 64, 4),
         TUNE_CONFIG_MULTISTAGE(Kernel, 256, 128, 32, 64, 64, 3),
+        // BK=64
+        TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 64, 32, 32, 2),
+        TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 64, 32, 32, 3),
+        TUNE_CONFIG_MULTISTAGE(Kernel, 128, 128, 64, 64, 64, 2),
+        TUNE_CONFIG_MULTISTAGE(Kernel, 256, 128, 64, 64, 64, 2),
     };
 }
 
@@ -122,20 +126,19 @@ inline std::vector<TuneConfig> GetWMMADynSmemVariants() {
 template<template<int, int, int, int, int, int, bool, int> class Kernel>
 inline std::vector<TuneConfig> GetWMMAFinalVariants() {
     return {
-        // No swizzle (best for large L2 like H200)
+        // BK=32, 128 threads
         TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 2, false, 8),
-        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 3, false, 8),
-        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 3, false, 8),
-        
-        // With swizzle, GROUP_SIZE_M=8
-        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 2, true, 8),
         TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 3, true, 8),
-        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 3, true, 8),
-        
-        // With swizzle, GROUP_SIZE_M=16
-        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 2, true, 16),
-        TUNE_CONFIG_FINAL(Kernel, 128, 128, 32, 64, 64, 3, true, 16),
-        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 3, true, 16),
+        // BK=64, 512 threads (the winning config from 04)
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 32, 32, 2, false, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 32, 32, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 32, 32, 3, true, 8),
+        // BK=64, 128 threads
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 64, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 64, 64, 3, true, 8),
+        // Larger tiles
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 64, 64, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 64, 32, 32, 2, true, 8),
     };
 }
 

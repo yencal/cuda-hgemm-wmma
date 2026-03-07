@@ -44,8 +44,12 @@ __global__ void wmma_double_buffer(
     static_assert((BN * BK) % NUM_THREADS == 0, "B tile must be evenly divisible among threads");
 
     // Padded shared memory
-    __shared__ __half As[STAGES][BM * A_STRIDE];
-    __shared__ __half Bs[STAGES][BN * B_STRIDE];
+    constexpr int A_STAGE_SIZE = BM * A_STRIDE;
+    constexpr int B_STAGE_SIZE = BN * B_STRIDE;
+    
+    extern __shared__ __half smem[];
+    __half* As = smem;
+    __half* Bs = smem + STAGES * A_STAGE_SIZE;
 
     const uint tid = threadIdx.x;
     const uint warpId = tid / 32;
@@ -77,8 +81,10 @@ __global__ void wmma_double_buffer(
     // ====== PROLOGUE: fill the pipeline with tiles ======
     #pragma unroll
     for (int s = 0; s < STAGES - 1 && s < numTiles; ++s) {
-        loadTileA_async_padded<BM, BK, A_STRIDE, NUM_THREADS>(A + s * BK, As[s], K, tid);
-        loadTileB_async_padded<BN, BK, B_STRIDE, NUM_THREADS>(B + s * BK, Bs[s], K, tid);
+        __half* As_stage = As + s * A_STAGE_SIZE;
+        __half* Bs_stage = Bs + s * B_STAGE_SIZE;
+        loadTileA_async_padded<BM, BK, A_STRIDE, NUM_THREADS>(A + s * BK, As_stage, K, tid);
+        loadTileB_async_padded<BN, BK, B_STRIDE, NUM_THREADS>(B + s * BK, Bs_stage, K, tid);
         __pipeline_commit();
     }
 
@@ -91,8 +97,10 @@ __global__ void wmma_double_buffer(
         // --- Async load: prefetch future tile ---
         if (loadTile < numTiles) {
             int loadStage = loadTile % STAGES;
-            loadTileA_async_padded<BM, BK, A_STRIDE, NUM_THREADS>(A + loadTile * BK, As[loadStage], K, tid);
-            loadTileB_async_padded<BN, BK, B_STRIDE, NUM_THREADS>(B + loadTile * BK, Bs[loadStage], K, tid);
+            __half* As_stage = As + loadStage * A_STAGE_SIZE;
+            __half* Bs_stage = Bs + loadStage * B_STAGE_SIZE;
+            loadTileA_async_padded<BM, BK, A_STRIDE, NUM_THREADS>(A + loadTile * BK, As_stage, K, tid);
+            loadTileB_async_padded<BN, BK, B_STRIDE, NUM_THREADS>(B + loadTile * BK, Bs_stage, K, tid);
             __pipeline_commit();
             ++loadTile;
         }
@@ -102,8 +110,8 @@ __global__ void wmma_double_buffer(
         __syncthreads();
 
         // Pointers to current tile in shared memory
-        const __half* As_tile = As[computeStage];
-        const __half* Bs_tile = Bs[computeStage];
+        const __half* As_tile = As + computeStage * A_STAGE_SIZE;
+        const __half* Bs_tile = Bs + computeStage * B_STAGE_SIZE;
 
         // --- Fragment double buffering within this tile ---
         int frag_load = 0;
@@ -164,13 +172,27 @@ struct WMMADoubleBuffer {
     static constexpr int WARPS_M = BM / WM;
     static constexpr int WARPS_N = BN / WN;
     static constexpr int NUM_THREADS = WARPS_M * WARPS_N * 32;
+    
+    static constexpr int SMEM_PAD = 8;
+    static constexpr int A_STRIDE = BK + SMEM_PAD;
+    static constexpr int B_STRIDE = BK + SMEM_PAD;
+    static constexpr size_t SMEM_SIZE = STAGES * (BM * A_STRIDE + BN * B_STRIDE) * sizeof(__half);
 
     static void Run(int M, int N, int K, __half alpha,
                     const __half* A, const __half* B,
                     __half beta, __half* C) {
+        static bool configured = false;
+        if (!configured) {
+            cudaFuncSetAttribute(
+                wmma_double_buffer<BM, BN, BK, WM, WN, STAGES>,
+                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                SMEM_SIZE
+            );
+            configured = true;
+        }
         dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
         dim3 block(NUM_THREADS);
-        wmma_double_buffer<BM, BN, BK, WM, WN, STAGES><<<grid, block>>>(
+        wmma_double_buffer<BM, BN, BK, WM, WN, STAGES><<<grid, block, SMEM_SIZE>>>(
             M, N, K, alpha, A, B, beta, C);
     }
 
@@ -180,5 +202,6 @@ struct WMMADoubleBuffer {
         printf("  Warp tile:  %dx%d\n", WM, WN);
         printf("  Stages:     %d\n", STAGES);
         printf("  Threads:    %d\n", NUM_THREADS);
+        printf("  Shared mem: %.2f KB\n", SMEM_SIZE / 1024.0f);
     }
 };
