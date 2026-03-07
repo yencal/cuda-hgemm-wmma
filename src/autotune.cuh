@@ -1,5 +1,7 @@
 // autotune.cuh
 // Autotuning framework for HGEMM kernels (FP16)
+//
+// NOTE: All kernels expect B to be pre-transposed as B_T[N,K] row-major.
 
 #pragma once
 
@@ -203,23 +205,28 @@ inline void RunAutotune(
     __half alpha = __float2half(1.0f),
     __half beta = __float2half(0.0f))
 {
-    __half *tune_A, *tune_B, *tune_C;
+    __half *tune_A, *tune_B, *tune_B_T, *tune_C;
     CHECK_CUDA(cudaMalloc(&tune_A, (size_t)tuneN * tuneN * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&tune_B, (size_t)tuneN * tuneN * sizeof(__half)));
+    CHECK_CUDA(cudaMalloc(&tune_B_T, (size_t)tuneN * tuneN * sizeof(__half)));
     CHECK_CUDA(cudaMalloc(&tune_C, (size_t)tuneN * tuneN * sizeof(__half)));
 
     FillRandomDevice(tune_A, (size_t)tuneN * tuneN);
     FillRandomDevice(tune_B, (size_t)tuneN * tuneN);
+    
+    // Transpose B for autotuning
+    TransposeMatrix(tune_B_T, tune_B, tuneN, tuneN);
 
     Autotuned<Tag>::config = Autotune(
-        variants, tuneN, tuneN, tuneN, alpha, tune_A, tune_B, beta, tune_C);
+        variants, tuneN, tuneN, tuneN, alpha, tune_A, tune_B_T, beta, tune_C);
 
     CHECK_CUDA(cudaFree(tune_A));
     CHECK_CUDA(cudaFree(tune_B));
+    CHECK_CUDA(cudaFree(tune_B_T));
     CHECK_CUDA(cudaFree(tune_C));
 }
 
-// Helper function: benchmark with autotuned config, label includes winning config name
+// Helper function: benchmark with autotuned config
 template<typename Tag>
 void RunAndRecordAutotuned(
     std::vector<BenchmarkResult>& results,
@@ -229,7 +236,6 @@ void RunAndRecordAutotuned(
     __half beta, __half* C, const __half* C_ref)
 {
     CHECK_CUDA(cudaMemset(C, 0, M * N * sizeof(__half)));
-    // std::string label = std::string(kernel_name) + " [" + Autotuned<Tag>::config.name + "]";
     std::string label = std::string(kernel_name);
     results.push_back(RunBenchmark<Autotuned<Tag>>(
         label.c_str(), M, N, K, alpha, A, B, beta, C, C_ref));

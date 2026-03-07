@@ -1,5 +1,8 @@
 // kernel_helpers.cuh
 // Reusable functions for WMMA HGEMM kernels (FP16)
+//
+// NOTE: All loadTileB functions expect B to be pre-transposed as B_T[N,K] row-major.
+//       This allows B to use the same small stride as A (BK + pad) for zero bank conflicts.
 
 #pragma once
 
@@ -11,7 +14,7 @@
 using namespace nvcuda;
 
 // =========================================================================
-// Tile Loading: Scalar (for 01_wmma_block_tiling)
+// Tile Loading A: Scalar
 // =========================================================================
 
 template <int BM, int BK, int NUM_THREADS>
@@ -32,26 +35,30 @@ __device__ void loadTileA_scalar(
     }
 }
 
-template <int BK, int BN, int NUM_THREADS>
+// =========================================================================
+// Tile Loading B: Scalar (B is [N,K] row-major)
+// =========================================================================
+
+template <int BN, int BK, int NUM_THREADS>
 __device__ void loadTileB_scalar(
-    const __half *B,
-    __half *Bs,
-    int N,
+    const __half *B,   // B[N,K] row-major, pointing to tile start
+    __half *Bs,        // Bs[BN][BK]
+    int K,
     uint tid)
 {
-    constexpr int ELEMS_PER_THREAD = (BK * BN) / NUM_THREADS;
+    constexpr int ELEMS_PER_THREAD = (BN * BK) / NUM_THREADS;
     
     #pragma unroll
     for (int i = 0; i < ELEMS_PER_THREAD; ++i) {
         uint idx = tid + i * NUM_THREADS;
-        uint row = idx / BN;
-        uint col = idx % BN;
-        Bs[row * BN + col] = B[row * N + col];
+        uint row = idx / BK;
+        uint col = idx % BK;
+        Bs[row * BK + col] = B[row * K + col];
     }
 }
 
 // =========================================================================
-// Tile Loading: Vectorized float4 = 8 halves (for 02_wmma_vectorized)
+// Tile Loading A: Vectorized float4 = 8 halves
 // =========================================================================
 
 template <int BM, int BK, int NUM_THREADS>
@@ -80,34 +87,38 @@ __device__ void loadTileA_vec4(
     }
 }
 
-template <int BK, int BN, int NUM_THREADS>
+// =========================================================================
+// Tile Loading B: Vectorized float4 = 8 halves (B is [N,K] row-major)
+// =========================================================================
+
+template <int BN, int BK, int NUM_THREADS>
 __device__ void loadTileB_vec4(
-    const __half *B,
-    __half *Bs,
-    int N,
+    const __half *B,   // B[N,K] row-major, pointing to tile start
+    __half *Bs,        // Bs[BN][BK]
+    int K,
     uint tid)
 {
-    constexpr int TOTAL_VEC = (BK * BN) / 8;
+    constexpr int TOTAL_VEC = (BN * BK) / 8;
     constexpr int VEC_PER_THREAD = TOTAL_VEC / NUM_THREADS;
     
-    static_assert((BK * BN) % 8 == 0, "Tile size must be divisible by 8");
+    static_assert((BN * BK) % 8 == 0, "Tile size must be divisible by 8");
     static_assert(TOTAL_VEC % NUM_THREADS == 0, "vec count must be divisible by NUM_THREADS");
-    static_assert(BN % 8 == 0, "BN must be divisible by 8 for vectorized loads");
+    static_assert(BK % 8 == 0, "BK must be divisible by 8 for vectorized loads");
     
     #pragma unroll
     for (int i = 0; i < VEC_PER_THREAD; ++i) {
         uint idx = tid + i * NUM_THREADS;
-        uint vec_per_row = BN / 8;
+        uint vec_per_row = BK / 8;
         uint row = idx / vec_per_row;
         uint col8 = idx % vec_per_row;
         
-        float4 val = reinterpret_cast<const float4*>(&B[row * N + col8 * 8])[0];
-        reinterpret_cast<float4*>(&Bs[row * BN + col8 * 8])[0] = val;
+        float4 val = reinterpret_cast<const float4*>(&B[row * K + col8 * 8])[0];
+        reinterpret_cast<float4*>(&Bs[row * BK + col8 * 8])[0] = val;
     }
 }
 
 // =========================================================================
-// Tile Loading: Async (cp.async, 16 bytes = 8 halves per copy)
+// Tile Loading A: Async (cp.async, 16 bytes = 8 halves per copy)
 // =========================================================================
 
 template <int BM, int BK, int NUM_THREADS>
@@ -133,31 +144,35 @@ __device__ void loadTileA_async(
     }
 }
 
-template <int BK, int BN, int NUM_THREADS>
+// =========================================================================
+// Tile Loading B: Async (B is [N,K] row-major)
+// =========================================================================
+
+template <int BN, int BK, int NUM_THREADS>
 __device__ void loadTileB_async(
-    const __half *B,
-    __half *Bs,
-    int N,
+    const __half *B,   // B[N,K] row-major, pointing to tile start
+    __half *Bs,        // Bs[BN][BK]
+    int K,
     uint tid)
 {
-    constexpr int TOTAL_VEC = (BK * BN) / 8;
+    constexpr int TOTAL_VEC = (BN * BK) / 8;
     constexpr int VEC_PER_THREAD = TOTAL_VEC / NUM_THREADS;
 
     #pragma unroll
     for (int i = 0; i < VEC_PER_THREAD; ++i) {
         uint idx = tid + i * NUM_THREADS;
-        uint row = idx / (BN / 8);
-        uint col8 = idx % (BN / 8);
+        uint row = idx / (BK / 8);
+        uint col8 = idx % (BK / 8);
         __pipeline_memcpy_async(
-            &Bs[row * BN + col8 * 8],
-            &B[row * N + col8 * 8],
+            &Bs[row * BK + col8 * 8],
+            &B[row * K + col8 * 8],
             sizeof(float4)
         );
     }
 }
 
 // =========================================================================
-// Padded tile loading (async)
+// Tile Loading A: Async with padding
 // =========================================================================
 
 template <int BM, int BK, int A_STRIDE, int NUM_THREADS>
@@ -176,8 +191,6 @@ __device__ void loadTileA_async_padded(
         uint row = idx / (BK / 8);
         uint col8 = idx % (BK / 8);
         
-        // Load from global (no padding)
-        // Store to shared with padded stride
         __pipeline_memcpy_async(
             &As[row * A_STRIDE + col8 * 8],
             &A[row * K + col8 * 8],
@@ -186,27 +199,29 @@ __device__ void loadTileA_async_padded(
     }
 }
 
-template <int BK, int BN, int B_STRIDE, int NUM_THREADS>
+// =========================================================================
+// Tile Loading B: Async with padding (B is [N,K] row-major)
+// =========================================================================
+
+template <int BN, int BK, int B_STRIDE, int NUM_THREADS>
 __device__ void loadTileB_async_padded(
-    const __half *B,
-    __half *Bs,
-    int N,
+    const __half *B,   // B[N,K] row-major, pointing to tile start
+    __half *Bs,        // Bs[BN][B_STRIDE]
+    int K,
     uint tid)
 {
-    constexpr int TOTAL_VEC = (BK * BN) / 8;
+    constexpr int TOTAL_VEC = (BN * BK) / 8;
     constexpr int VEC_PER_THREAD = TOTAL_VEC / NUM_THREADS;
 
     #pragma unroll
     for (int i = 0; i < VEC_PER_THREAD; ++i) {
         uint idx = tid + i * NUM_THREADS;
-        uint row = idx / (BN / 8);
-        uint col8 = idx % (BN / 8);
+        uint row = idx / (BK / 8);
+        uint col8 = idx % (BK / 8);
         
-        // Load from global (no padding)
-        // Store to shared with padded stride
         __pipeline_memcpy_async(
             &Bs[row * B_STRIDE + col8 * 8],
-            &B[row * N + col8 * 8],
+            &B[row * K + col8 * 8],
             sizeof(float4)
         );
     }
@@ -256,6 +271,7 @@ __device__ void epilogueAndStore(
 // =========================================================================
 // Vectorized Epilogue (reuses existing shared memory)
 // =========================================================================
+
 template <int BM, int BN, int WM, int WN, 
           int MMA_M, int MMA_N, int MMA_K,
           int MMA_M_TILES, int MMA_N_TILES, 
@@ -263,7 +279,7 @@ template <int BM, int BN, int WM, int WN,
           int C_SMEM_STRIDE>
 __device__ void epilogueAndStore_vec4(
     wmma::fragment<wmma::accumulator, MMA_M, MMA_N, MMA_K, __half> acc[MMA_M_TILES][MMA_N_TILES],
-    __half *smem,      // Reused shared memory (was used for A/B)
+    __half *smem,
     __half *C,
     int N,
     __half alpha,
@@ -272,21 +288,18 @@ __device__ void epilogueAndStore_vec4(
     uint warpM,
     uint warpN)
 {
-    // Use passed-in smem as C_smem
     __half *C_smem = smem;
     
-    // ====== Step 1: Scale by alpha and handle beta ======
+    // Scale by alpha and handle beta
     #pragma unroll
     for (int m = 0; m < MMA_M_TILES; ++m) {
         #pragma unroll
         for (int n = 0; n < MMA_N_TILES; ++n) {
-            // Scale accumulator by alpha
             #pragma unroll
             for (int i = 0; i < acc[m][n].num_elements; ++i) {
                 acc[m][n].x[i] = __hmul(acc[m][n].x[i], alpha);
             }
             
-            // Handle beta * C if beta != 0
             if (__heq(beta, __float2half(0.0f)) == false) {
                 __half *C_ptr = C + (warpM * WM + m * MMA_M) * N 
                                   + (warpN * WN + n * MMA_N);
@@ -301,7 +314,7 @@ __device__ void epilogueAndStore_vec4(
         }
     }
     
-    // ====== Step 2: Store fragments to shared memory ======
+    // Store fragments to shared memory
     #pragma unroll
     for (int m = 0; m < MMA_M_TILES; ++m) {
         #pragma unroll
@@ -314,10 +327,10 @@ __device__ void epilogueAndStore_vec4(
     
     __syncthreads();
     
-    // ====== Step 3: Vectorized copy from shared to global ======
+    // Vectorized copy from shared to global
     constexpr int NUM_THREADS = WARPS_M * WARPS_N * 32;
     constexpr int TOTAL_ELEMENTS = BM * BN;
-    constexpr int ELEMENTS_PER_VEC = 8;  // float4 = 8 halves
+    constexpr int ELEMENTS_PER_VEC = 8;
     constexpr int TOTAL_VECS = TOTAL_ELEMENTS / ELEMENTS_PER_VEC;
     constexpr int VECS_PER_THREAD = TOTAL_VECS / NUM_THREADS;
     
@@ -332,10 +345,7 @@ __device__ void epilogueAndStore_vec4(
         int row = vec_idx / vecs_per_row;
         int col8 = vec_idx % vecs_per_row;
         
-        // Load from shared (padded stride)
         float4 val = *reinterpret_cast<float4*>(&C_smem[row * C_SMEM_STRIDE + col8 * 8]);
-        
-        // Store to global (natural stride N)
         *reinterpret_cast<float4*>(&C[row * N + col8 * 8]) = val;
     }
 }

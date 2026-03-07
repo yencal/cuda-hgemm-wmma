@@ -1,5 +1,8 @@
 // 04_wmma_padded.cuh
 // WMMA HGEMM with async copy and padded shared memory to avoid bank conflicts
+//
+// NOTE: Expects B to be pre-transposed as B_T[N,K] row-major.
+//       Both A and B now use the same small stride (BK + pad) for zero bank conflicts.
 
 #pragma once
 
@@ -26,10 +29,10 @@ __global__ void wmma_padded(
     constexpr int WARPS_N = BN / WN;
     constexpr int NUM_THREADS = WARPS_M * WARPS_N * 32;
 
-    // Padded strides
+    // Padded strides - both use BK + pad for zero bank conflicts
     constexpr int SMEM_PAD = 8;
     constexpr int A_STRIDE = BK + SMEM_PAD;
-    constexpr int B_STRIDE = BN + SMEM_PAD;
+    constexpr int B_STRIDE = BK + SMEM_PAD;
 
     static_assert(BM % WM == 0, "BM must be divisible by WM");
     static_assert(BN % WN == 0, "BN must be divisible by WN");
@@ -37,11 +40,11 @@ __global__ void wmma_padded(
     static_assert(WM % MMA_M == 0, "WM must be divisible by MMA_M (16)");
     static_assert(WN % MMA_N == 0, "WN must be divisible by MMA_N (16)");
     static_assert((BM * BK) % NUM_THREADS == 0, "A tile must be evenly divisible among threads");
-    static_assert((BK * BN) % NUM_THREADS == 0, "B tile must be evenly divisible among threads");
+    static_assert((BN * BK) % NUM_THREADS == 0, "B tile must be evenly divisible among threads");
 
     // Padded shared memory
     __shared__ __half As[BM * A_STRIDE];
-    __shared__ __half Bs[BK * B_STRIDE];
+    __shared__ __half Bs[BN * B_STRIDE];
 
     const uint tid = threadIdx.x;
     const uint warpId = tid / 32;
@@ -49,7 +52,7 @@ __global__ void wmma_padded(
     const uint warpN = warpId % WARPS_N;
 
     A += blockIdx.y * BM * K;
-    B += blockIdx.x * BN;
+    B += blockIdx.x * BN * K;
     C += blockIdx.y * BM * N + blockIdx.x * BN;
 
     wmma::fragment<wmma::accumulator, MMA_M, MMA_N, MMA_K, __half> 
@@ -62,9 +65,8 @@ __global__ void wmma_padded(
             wmma::fill_fragment(acc[m][n], __float2half(0.0f));
 
     for (int tileK = 0; tileK < K; tileK += BK) {
-        // Load with padded strides
         loadTileA_async_padded<BM, BK, A_STRIDE, NUM_THREADS>(A, As, K, tid);
-        loadTileB_async_padded<BK, BN, B_STRIDE, NUM_THREADS>(B, Bs, N, tid);
+        loadTileB_async_padded<BN, BK, B_STRIDE, NUM_THREADS>(B, Bs, K, tid);
         __pipeline_commit();
         __pipeline_wait_prior(0);
         __syncthreads();
@@ -76,18 +78,16 @@ __global__ void wmma_padded(
 
             #pragma unroll
             for (int m = 0; m < MMA_M_TILES; ++m) {
-                // Use padded stride for indexing and load
                 const __half *As_ptr = &As[(warpM * WM + m * MMA_M) * A_STRIDE + innerK];
                 wmma::load_matrix_sync(a_frag[m], As_ptr, A_STRIDE);
             }
 
             wmma::fragment<wmma::matrix_b, MMA_M, MMA_N, MMA_K, 
-                __half, wmma::row_major> b_frag[MMA_N_TILES];
+                __half, wmma::col_major> b_frag[MMA_N_TILES];
 
             #pragma unroll
             for (int n = 0; n < MMA_N_TILES; ++n) {
-                // Use padded stride for indexing and load
-                const __half *Bs_ptr = &Bs[innerK * B_STRIDE + warpN * WN + n * MMA_N];
+                const __half *Bs_ptr = &Bs[(warpN * WN + n * MMA_N) * B_STRIDE + innerK];
                 wmma::load_matrix_sync(b_frag[n], Bs_ptr, B_STRIDE);
             }
 
@@ -100,7 +100,7 @@ __global__ void wmma_padded(
 
         __syncthreads();
         A += BK;
-        B += BK * N;
+        B += BK;
     }
 
     epilogueAndStore<MMA_M, MMA_N, MMA_K, MMA_M_TILES, MMA_N_TILES, WM, WN>(

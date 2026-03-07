@@ -193,3 +193,25 @@ BenchmarkResult RunCuBLASBenchmark(
 
     return BenchmarkResult{label, N, avg_ms, tflops};
 }
+
+// =========================================================================
+// Matrix Transpose: B[K,N] -> B_T[N,K]
+// =========================================================================
+
+__global__ void transpose_kernel(const __half* src, __half* dst, int K, int N)
+{
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
+    int k = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (n < N && k < K) {
+        dst[n * K + k] = src[k * N + n];
+    }
+}
+
+inline void TransposeMatrix(__half* d_dst, const __half* d_src, int K, int N)
+{
+    dim3 block(32, 32);
+    dim3 grid((N + 31) / 32, (K + 31) / 32);
+    transpose_kernel<<<grid, block>>>(d_src, d_dst, K, N);
+    CHECK_CUDA(cudaDeviceSynchronize());
+}

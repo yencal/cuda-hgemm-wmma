@@ -1,12 +1,15 @@
 // 08_wmma_final.cuh
 // WMMA HGEMM with all optimizations:
 //   - Padded shared memory (bank conflict free)
-//   - Multi-stage async pipeline (global → shared overlap)
-//   - Fragment double buffering (shared → register overlap)
+//   - Multi-stage async pipeline (global -> shared overlap)
+//   - Fragment double buffering (shared -> register overlap)
 //   - Dynamic shared memory (exceed 48KB limit)
 //   - Vectorized epilogue (reuse A/B smem for C)
 //   - Zig-zag MMA order (register reuse)
 //   - Block swizzling (L2 cache optimization, NVIDIA/CUTLASS style)
+//
+// NOTE: Expects B to be pre-transposed as B_T[N,K] row-major.
+//       Both A and B use the same small stride (BK + pad) for zero bank conflicts.
 
 #pragma once
 
@@ -18,9 +21,6 @@
 
 using namespace nvcuda;
 
-// =========================================================================
-// Main Kernel
-// =========================================================================
 template <int BM, int BN, int BK, int WM, int WN, int STAGES, 
           bool USE_SWIZZLE = false, int GROUP_SIZE_M = 8>
 __global__ void wmma_final(
@@ -37,14 +37,14 @@ __global__ void wmma_final(
     constexpr int WARPS_N = BN / WN;
     constexpr int NUM_THREADS = WARPS_M * WARPS_N * 32;
 
-    // Padded strides for A and B
+    // Padded strides - both use BK + pad for zero bank conflicts
     constexpr int SMEM_PAD = 8;
     constexpr int A_STRIDE = BK + SMEM_PAD;
-    constexpr int B_STRIDE = BN + SMEM_PAD;
+    constexpr int B_STRIDE = BK + SMEM_PAD;
 
     // Sizes per stage
     constexpr int A_STAGE_SIZE = BM * A_STRIDE;
-    constexpr int B_STAGE_SIZE = BK * B_STRIDE;
+    constexpr int B_STAGE_SIZE = BN * B_STRIDE;
     constexpr int TOTAL_AB_SIZE = STAGES * (A_STAGE_SIZE + B_STAGE_SIZE);
 
     // C epilogue requirements (padded for bank-conflict-free stores)
@@ -62,7 +62,7 @@ __global__ void wmma_final(
     static_assert(WM % MMA_M == 0, "WM must be divisible by MMA_M (16)");
     static_assert(WN % MMA_N == 0, "WN must be divisible by MMA_N (16)");
     static_assert((BM * BK) % NUM_THREADS == 0, "A tile must be evenly divisible among threads");
-    static_assert((BK * BN) % NUM_THREADS == 0, "B tile must be evenly divisible among threads");
+    static_assert((BN * BK) % NUM_THREADS == 0, "B tile must be evenly divisible among threads");
 
     // Dynamic shared memory
     extern __shared__ __half smem[];
@@ -77,13 +77,11 @@ __global__ void wmma_final(
     // Block index calculation
     uint blockM, blockN;
     if constexpr (USE_SWIZZLE) {
-        // NVIDIA blog / CUTLASS style swizzle (GROUP_SIZE_M rows at a time)
-        // Uses 1D grid, computes 2D indices with grouping for L2 reuse of A tiles
         const uint num_blocks_m = (M + BM - 1) / BM;
         const uint num_blocks_n = (N + BN - 1) / BN;
         const uint num_blocks_in_group = GROUP_SIZE_M * num_blocks_n;
         
-        const uint bid = blockIdx.x;  // 1D block index
+        const uint bid = blockIdx.x;
         const uint group_id = bid / num_blocks_in_group;
         const uint first_block_m = group_id * GROUP_SIZE_M;
         const uint group_size_m = min(num_blocks_m - first_block_m, (uint)GROUP_SIZE_M);
@@ -91,7 +89,6 @@ __global__ void wmma_final(
         blockM = first_block_m + (bid % group_size_m);
         blockN = (bid % num_blocks_in_group) / group_size_m;
     } else {
-        // Simple 2D grid
         blockM = blockIdx.y;
         blockN = blockIdx.x;
     }
@@ -100,7 +97,7 @@ __global__ void wmma_final(
     if (blockM * BM >= M || blockN * BN >= N) return;
 
     A += blockM * BM * K;
-    B += blockN * BN;
+    B += blockN * BN * K;
     C += blockM * BM * N + blockN * BN;
 
     // Accumulators
@@ -116,7 +113,7 @@ __global__ void wmma_final(
     // Double-buffered fragments
     wmma::fragment<wmma::matrix_a, MMA_M, MMA_N, MMA_K, __half, wmma::row_major> 
         a_frag[2][MMA_M_TILES];
-    wmma::fragment<wmma::matrix_b, MMA_M, MMA_N, MMA_K, __half, wmma::row_major> 
+    wmma::fragment<wmma::matrix_b, MMA_M, MMA_N, MMA_K, __half, wmma::col_major> 
         b_frag[2][MMA_N_TILES];
 
     const int numTiles = K / BK;
@@ -127,7 +124,7 @@ __global__ void wmma_final(
         __half* As_stage = As + s * A_STAGE_SIZE;
         __half* Bs_stage = Bs + s * B_STAGE_SIZE;
         loadTileA_async_padded<BM, BK, A_STRIDE, NUM_THREADS>(A + s * BK, As_stage, K, tid);
-        loadTileB_async_padded<BK, BN, B_STRIDE, NUM_THREADS>(B + s * BK * N, Bs_stage, N, tid);
+        loadTileB_async_padded<BN, BK, B_STRIDE, NUM_THREADS>(B + s * BK, Bs_stage, K, tid);
         __pipeline_commit();
     }
 
@@ -143,7 +140,7 @@ __global__ void wmma_final(
             __half* As_stage = As + loadStage * A_STAGE_SIZE;
             __half* Bs_stage = Bs + loadStage * B_STAGE_SIZE;
             loadTileA_async_padded<BM, BK, A_STRIDE, NUM_THREADS>(A + loadTile * BK, As_stage, K, tid);
-            loadTileB_async_padded<BK, BN, B_STRIDE, NUM_THREADS>(B + loadTile * BK * N, Bs_stage, N, tid);
+            loadTileB_async_padded<BN, BK, B_STRIDE, NUM_THREADS>(B + loadTile * BK, Bs_stage, K, tid);
             __pipeline_commit();
             ++loadTile;
         }
@@ -168,7 +165,7 @@ __global__ void wmma_final(
         }
         #pragma unroll
         for (int n = 0; n < MMA_N_TILES; ++n) {
-            const __half *Bs_ptr = &Bs_tile[0 * B_STRIDE + warpN * WN + n * MMA_N];
+            const __half *Bs_ptr = &Bs_tile[(warpN * WN + n * MMA_N) * B_STRIDE + 0];
             wmma::load_matrix_sync(b_frag[frag_load][n], Bs_ptr, B_STRIDE);
         }
 
@@ -188,7 +185,7 @@ __global__ void wmma_final(
                 }
                 #pragma unroll
                 for (int n = 0; n < MMA_N_TILES; ++n) {
-                    const __half *Bs_ptr = &Bs_tile[(innerK + MMA_K) * B_STRIDE + warpN * WN + n * MMA_N];
+                    const __half *Bs_ptr = &Bs_tile[(warpN * WN + n * MMA_N) * B_STRIDE + innerK + MMA_K];
                     wmma::load_matrix_sync(b_frag[frag_load][n], Bs_ptr, B_STRIDE);
                 }
             }
@@ -213,9 +210,6 @@ __global__ void wmma_final(
         acc, smem, C, N, alpha, beta, tid, warpM, warpN);
 }
 
-// =========================================================================
-// Kernel Wrapper
-// =========================================================================
 template<int BM, int BN, int BK, int WM, int WN, int STAGES = 2, 
          bool USE_SWIZZLE = false, int GROUP_SIZE_M = 8>
 struct WMMAFinal {
@@ -225,8 +219,8 @@ struct WMMAFinal {
     
     static constexpr int SMEM_PAD = 8;
     static constexpr int A_STRIDE = BK + SMEM_PAD;
-    static constexpr int B_STRIDE = BN + SMEM_PAD;
-    static constexpr size_t SMEM_SIZE = STAGES * (BM * A_STRIDE + BK * B_STRIDE) * sizeof(__half);
+    static constexpr int B_STRIDE = BK + SMEM_PAD;
+    static constexpr size_t SMEM_SIZE = STAGES * (BM * A_STRIDE + BN * B_STRIDE) * sizeof(__half);
 
     static void Run(int M, int N, int K, __half alpha,
                     const __half* A, const __half* B,
@@ -250,10 +244,8 @@ struct WMMAFinal {
         dim3 grid;
 
         if constexpr (USE_SWIZZLE) {
-            // 1D grid for swizzled access
             grid = dim3(numBlocksM * numBlocksN);
         } else {
-            // 2D grid: (columns, rows)
             grid = dim3(numBlocksN, numBlocksM);
         }
         

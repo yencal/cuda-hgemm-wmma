@@ -2,6 +2,9 @@
 // WMMA HGEMM with all optimizations + dynamic shared memory
 // Allows exceeding 48KB static limit (A100 supports up to 164KB)
 // Includes: padding, multi-stage pipeline, fragment double buffering
+//
+// NOTE: Expects B to be pre-transposed as B_T[N,K] row-major.
+//       Both A and B now use the same small stride (BK + pad) for zero bank conflicts.
 
 #pragma once
 
@@ -28,14 +31,14 @@ __global__ void wmma_dynsmem(
     constexpr int WARPS_N = BN / WN;
     constexpr int NUM_THREADS = WARPS_M * WARPS_N * 32;
 
-    // Padded strides
+    // Padded strides - both use BK + pad for zero bank conflicts
     constexpr int SMEM_PAD = 8;
     constexpr int A_STRIDE = BK + SMEM_PAD;
-    constexpr int B_STRIDE = BN + SMEM_PAD;
+    constexpr int B_STRIDE = BK + SMEM_PAD;
 
     // Sizes per stage
     constexpr int A_STAGE_SIZE = BM * A_STRIDE;
-    constexpr int B_STAGE_SIZE = BK * B_STRIDE;
+    constexpr int B_STAGE_SIZE = BN * B_STRIDE;
 
     static_assert(BM % WM == 0, "BM must be divisible by WM");
     static_assert(BN % WN == 0, "BN must be divisible by WN");
@@ -43,12 +46,12 @@ __global__ void wmma_dynsmem(
     static_assert(WM % MMA_M == 0, "WM must be divisible by MMA_M (16)");
     static_assert(WN % MMA_N == 0, "WN must be divisible by MMA_N (16)");
     static_assert((BM * BK) % NUM_THREADS == 0, "A tile must be evenly divisible among threads");
-    static_assert((BK * BN) % NUM_THREADS == 0, "B tile must be evenly divisible among threads");
+    static_assert((BN * BK) % NUM_THREADS == 0, "B tile must be evenly divisible among threads");
 
     // Dynamic shared memory
     extern __shared__ __half smem[];
-    __half* As = smem;                          // As[STAGES][BM * A_STRIDE]
-    __half* Bs = smem + STAGES * A_STAGE_SIZE;  // Bs[STAGES][BK * B_STRIDE]
+    __half* As = smem;
+    __half* Bs = smem + STAGES * A_STAGE_SIZE;
 
     const uint tid = threadIdx.x;
     const uint warpId = tid / 32;
@@ -56,7 +59,7 @@ __global__ void wmma_dynsmem(
     const uint warpN = warpId % WARPS_N;
 
     A += blockIdx.y * BM * K;
-    B += blockIdx.x * BN;
+    B += blockIdx.x * BN * K;
     C += blockIdx.y * BM * N + blockIdx.x * BN;
 
     // Accumulators
@@ -72,7 +75,7 @@ __global__ void wmma_dynsmem(
     // Double-buffered fragments
     wmma::fragment<wmma::matrix_a, MMA_M, MMA_N, MMA_K, __half, wmma::row_major> 
         a_frag[2][MMA_M_TILES];
-    wmma::fragment<wmma::matrix_b, MMA_M, MMA_N, MMA_K, __half, wmma::row_major> 
+    wmma::fragment<wmma::matrix_b, MMA_M, MMA_N, MMA_K, __half, wmma::col_major> 
         b_frag[2][MMA_N_TILES];
 
     const int numTiles = K / BK;
@@ -83,7 +86,7 @@ __global__ void wmma_dynsmem(
         __half* As_stage = As + s * A_STAGE_SIZE;
         __half* Bs_stage = Bs + s * B_STAGE_SIZE;
         loadTileA_async_padded<BM, BK, A_STRIDE, NUM_THREADS>(A + s * BK, As_stage, K, tid);
-        loadTileB_async_padded<BK, BN, B_STRIDE, NUM_THREADS>(B + s * BK * N, Bs_stage, N, tid);
+        loadTileB_async_padded<BN, BK, B_STRIDE, NUM_THREADS>(B + s * BK, Bs_stage, K, tid);
         __pipeline_commit();
     }
 
@@ -99,7 +102,7 @@ __global__ void wmma_dynsmem(
             __half* As_stage = As + loadStage * A_STAGE_SIZE;
             __half* Bs_stage = Bs + loadStage * B_STAGE_SIZE;
             loadTileA_async_padded<BM, BK, A_STRIDE, NUM_THREADS>(A + loadTile * BK, As_stage, K, tid);
-            loadTileB_async_padded<BK, BN, B_STRIDE, NUM_THREADS>(B + loadTile * BK * N, Bs_stage, N, tid);
+            loadTileB_async_padded<BN, BK, B_STRIDE, NUM_THREADS>(B + loadTile * BK, Bs_stage, K, tid);
             __pipeline_commit();
             ++loadTile;
         }
@@ -124,7 +127,7 @@ __global__ void wmma_dynsmem(
         }
         #pragma unroll
         for (int n = 0; n < MMA_N_TILES; ++n) {
-            const __half *Bs_ptr = &Bs_tile[0 * B_STRIDE + warpN * WN + n * MMA_N];
+            const __half *Bs_ptr = &Bs_tile[(warpN * WN + n * MMA_N) * B_STRIDE + 0];
             wmma::load_matrix_sync(b_frag[frag_load][n], Bs_ptr, B_STRIDE);
         }
 
@@ -144,7 +147,7 @@ __global__ void wmma_dynsmem(
                 }
                 #pragma unroll
                 for (int n = 0; n < MMA_N_TILES; ++n) {
-                    const __half *Bs_ptr = &Bs_tile[(innerK + MMA_K) * B_STRIDE + warpN * WN + n * MMA_N];
+                    const __half *Bs_ptr = &Bs_tile[(warpN * WN + n * MMA_N) * B_STRIDE + innerK + MMA_K];
                     wmma::load_matrix_sync(b_frag[frag_load][n], Bs_ptr, B_STRIDE);
                 }
             }
@@ -174,8 +177,8 @@ struct WMMADynSmem {
     
     static constexpr int SMEM_PAD = 8;
     static constexpr int A_STRIDE = BK + SMEM_PAD;
-    static constexpr int B_STRIDE = BN + SMEM_PAD;
-    static constexpr size_t SMEM_SIZE = STAGES * (BM * A_STRIDE + BK * B_STRIDE) * sizeof(__half);
+    static constexpr int B_STRIDE = BK + SMEM_PAD;
+    static constexpr size_t SMEM_SIZE = STAGES * (BM * A_STRIDE + BN * B_STRIDE) * sizeof(__half);
 
     static void Run(int M, int N, int K, __half alpha,
                     const __half* A, const __half* B,
