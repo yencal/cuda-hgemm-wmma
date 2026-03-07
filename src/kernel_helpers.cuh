@@ -228,6 +228,104 @@ __device__ void loadTileB_async_padded(
 }
 
 // =========================================================================
+// Tile Loading A: Warp-based async (better locality, generalized BK)
+// =========================================================================
+
+template <int BM, int BK, int A_STRIDE, int NUM_THREADS>
+__device__ void loadTileA_warp_based(
+    const __half *A,
+    __half *As,
+    int K,
+    uint tid)
+{
+    // Constants
+    constexpr int WARPS = NUM_THREADS / 32;
+    constexpr int ROWS_PER_WARP = BM / WARPS;
+    constexpr int THREADS_PER_ROW = BK / 8;              // Each thread loads 8 halves (16 bytes)
+    constexpr int ROWS_PER_ITER = 32 / THREADS_PER_ROW;  // Rows covered per iteration
+    constexpr int ITERS = ROWS_PER_WARP / ROWS_PER_ITER; // Iterations per warp
+
+    static_assert(BK % 8 == 0, "BK must be divisible by 8");
+    static_assert(32 % THREADS_PER_ROW == 0, "Warp size must be divisible by THREADS_PER_ROW");
+    static_assert(ROWS_PER_WARP % ROWS_PER_ITER == 0, "ROWS_PER_WARP must be divisible by ROWS_PER_ITER");
+
+    // Thread mapping within warp
+    const uint warp_id = tid / 32;
+    const uint lane_id = tid % 32;
+    const uint row_in_chunk = lane_id / THREADS_PER_ROW;
+    const uint col_in_row = lane_id % THREADS_PER_ROW;
+
+    // Global memory base for this warp
+    const __half* A_warp_ptr = A + warp_id * ROWS_PER_WARP * K;
+
+    // Shared memory base row for this warp
+    uint smem_row = warp_id * ROWS_PER_WARP + row_in_chunk;
+
+    #pragma unroll
+    for (int i = 0; i < ITERS; ++i) {
+        // Async copy 16 bytes (8 halves)
+        __pipeline_memcpy_async(
+            &As[smem_row * A_STRIDE + col_in_row * 8],
+            A_warp_ptr + row_in_chunk * K + col_in_row * 8,
+            sizeof(float4)
+        );
+
+        // Advance to next chunk of rows
+        A_warp_ptr += ROWS_PER_ITER * K;
+        smem_row += ROWS_PER_ITER;
+    }
+}
+
+// =========================================================================
+// Tile Loading B: Warp-based async (B is [N,K] row-major, generalized BK)
+// =========================================================================
+
+template <int BN, int BK, int B_STRIDE, int NUM_THREADS>
+__device__ void loadTileB_warp_based(
+    const __half *B,   // B[N,K] row-major, pointing to tile start
+    __half *Bs,        // Bs[BN][B_STRIDE]
+    int K,
+    uint tid)
+{
+    // Constants (same structure as A loader)
+    constexpr int WARPS = NUM_THREADS / 32;
+    constexpr int ROWS_PER_WARP = BN / WARPS;
+    constexpr int THREADS_PER_ROW = BK / 8;              // Each thread loads 8 halves (16 bytes)
+    constexpr int ROWS_PER_ITER = 32 / THREADS_PER_ROW;  // Rows covered per iteration
+    constexpr int ITERS = ROWS_PER_WARP / ROWS_PER_ITER; // Iterations per warp
+
+    static_assert(BK % 8 == 0, "BK must be divisible by 8");
+    static_assert(32 % THREADS_PER_ROW == 0, "Warp size must be divisible by THREADS_PER_ROW");
+    static_assert(ROWS_PER_WARP % ROWS_PER_ITER == 0, "ROWS_PER_WARP must be divisible by ROWS_PER_ITER");
+
+    // Thread mapping within warp
+    const uint warp_id = tid / 32;
+    const uint lane_id = tid % 32;
+    const uint row_in_chunk = lane_id / THREADS_PER_ROW;
+    const uint col_in_row = lane_id % THREADS_PER_ROW;
+
+    // Global memory base for this warp
+    const __half* B_warp_ptr = B + warp_id * ROWS_PER_WARP * K;
+
+    // Shared memory base row for this warp
+    uint smem_row = warp_id * ROWS_PER_WARP + row_in_chunk;
+
+    #pragma unroll
+    for (int i = 0; i < ITERS; ++i) {
+        // Async copy 16 bytes (8 halves)
+        __pipeline_memcpy_async(
+            &Bs[smem_row * B_STRIDE + col_in_row * 8],
+            B_warp_ptr + row_in_chunk * K + col_in_row * 8,
+            sizeof(float4)
+        );
+
+        // Advance to next chunk of rows
+        B_warp_ptr += ROWS_PER_ITER * K;
+        smem_row += ROWS_PER_ITER;
+    }
+}
+
+// =========================================================================
 // Epilogue: C = alpha * acc + beta * C (FP16 accumulator)
 // =========================================================================
 

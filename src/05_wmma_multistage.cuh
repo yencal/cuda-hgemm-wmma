@@ -101,7 +101,7 @@ __global__ void wmma_multistage(
         // Wait for compute stage
         __pipeline_wait_prior(STAGES - 1);
         __syncthreads();
-        
+
         // Compute pointers for this stage
         const __half* As_tile = As + computeStage * A_STAGE_SIZE;
         const __half* Bs_tile = Bs + computeStage * B_STAGE_SIZE;
@@ -122,7 +122,7 @@ __global__ void wmma_multistage(
 
             #pragma unroll
             for (int n = 0; n < MMA_N_TILES; ++n) {
-                const __half *Bs_ptr = &Bs_tile[computeStage][(warpN * WN + n * MMA_N) * B_STRIDE + innerK];
+                const __half *Bs_ptr = &Bs_tile[(warpN * WN + n * MMA_N) * B_STRIDE + innerK];
                 wmma::load_matrix_sync(b_frag[n], Bs_ptr, B_STRIDE);
             }
 

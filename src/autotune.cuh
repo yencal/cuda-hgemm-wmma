@@ -138,7 +138,9 @@ inline std::vector<TuneConfig> GetWMMAFinalVariants() {
         TUNE_CONFIG_FINAL(Kernel, 128, 128, 64, 64, 64, 3, true, 8),
         // Larger tiles
         TUNE_CONFIG_FINAL(Kernel, 256, 128, 64, 64, 64, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 32, 64, 64, 3, true, 8),
         TUNE_CONFIG_FINAL(Kernel, 256, 128, 64, 32, 32, 2, true, 8),
+        TUNE_CONFIG_FINAL(Kernel, 256, 128, 64, 32, 32, 3, true, 8),
     };
 }
 
@@ -147,7 +149,7 @@ inline TuneConfig Autotune(
     int M, int N, int K, __half alpha,
     const __half* A, const __half* B,
     __half beta, __half* C,
-    int warmup = 2, int iters = 10)
+    int warmup = 5, int iters = 10)
 {
     float best_time = FLT_MAX;
     TuneConfig best = variants[0];
